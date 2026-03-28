@@ -124,7 +124,7 @@ class EPUBGenerator:
 
             if Path(img_path).exists():
                 try:
-                    alt = self.llm.ask_vision(ALT_TEXT_PROMPT, img_path)
+                    alt = self.llm.ask_vision(ALT_TEXT_PROMPT, img_path, model_key="alt_text")
                     alt = alt.strip().strip('"').strip("'")
                     logger.info(f"Generated alt text for {img_path}: {alt[:50]}...")
                     updated_images.append((img_path, alt))

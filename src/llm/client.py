@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -9,11 +10,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-API_KEY = "REDACTED_API_KEY"
+API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # Model configs with approximate costs per 1M tokens
 MODELS = {
     "vision": "qwen/qwen3-vl-32b-instruct",
+    "alt_text": "openai/gpt-5-mini",
     "text_cheap": "google/gemini-2.5-flash-lite",
     "text_fast": "x-ai/grok-4.1-fast",
 }
