@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 class Pipeline:
     """Orchestrates the 6-stage PDF-to-EPUB3 conversion pipeline."""
 
-    def __init__(self, use_llm: bool = True):
+    def __init__(self, use_llm: bool = True, epubcheck_path: str = None):
         self.llm = LLMClient() if use_llm else None
+        self.epubcheck_path = epubcheck_path
 
     def run(self, pdf_path: str, output_path: str = None) -> dict:
         pdf_path = Path(pdf_path)
@@ -113,7 +114,7 @@ class Pipeline:
         logger.info("=" * 60)
         logger.info("STAGE 6: Quality Check")
         t0 = time.time()
-        checker = QualityChecker()
+        checker = QualityChecker(epubcheck_path=self.epubcheck_path)
         validation = checker.check(epub_path)
         results['timings']['stage6'] = time.time() - t0
         results['validation'] = validation
