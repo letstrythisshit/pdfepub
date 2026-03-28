@@ -225,8 +225,10 @@ class LayoutDetector:
 
     def _detect_footnote_zone(self, analysis, body_size, footnote_size) -> float:
         """Find the y-threshold where footnotes begin."""
-        # Look for pages where small text appears at the bottom
+        import re
         footnote_ys = []
+
+        # Method 1: Look for pages where small text appears at the bottom
         for page in analysis.pages:
             small_blocks = [
                 b for b in page.text_blocks
@@ -237,7 +239,6 @@ class LayoutDetector:
                 if abs(b.font_size - body_size) < SIZE_TOLERANCE and b.norm_bbox[1] > 0.3
             ]
             if small_blocks and body_blocks:
-                # Find the gap between last body text and first footnote
                 max_body_y = max(b.norm_bbox[3] for b in body_blocks)
                 min_fn_y = min(b.norm_bbox[1] for b in small_blocks)
                 if min_fn_y > max_body_y:
@@ -245,7 +246,39 @@ class LayoutDetector:
 
         if footnote_ys:
             threshold = np.median(footnote_ys)
-            logger.info(f"Footnote zone threshold: {threshold:.3f}")
+            logger.info(f"Footnote zone threshold (small font): {threshold:.3f}")
+            return threshold
+
+        # Method 2: Detect same-size footnotes at page bottom (number-prefixed blocks)
+        # Some books use body font size for footnotes, separated only by position
+        for page in analysis.pages:
+            bottom_blocks = sorted(
+                [b for b in page.text_blocks if b.norm_bbox[1] > 0.7],
+                key=lambda b: b.norm_bbox[1]
+            )
+            # Check if bottom blocks start with a number (footnote pattern)
+            fn_candidates = []
+            for b in bottom_blocks:
+                text = b.text.strip()
+                if re.match(r'^\d{1,3}\s', text) or re.match(r'^\d{1,3}$', text):
+                    fn_candidates.append(b)
+
+            if len(fn_candidates) >= 1:
+                # Find the gap between the last non-footnote block and the first footnote
+                fn_min_y = min(b.norm_bbox[1] for b in fn_candidates)
+                upper_blocks = [
+                    b for b in page.text_blocks
+                    if b.norm_bbox[3] < fn_min_y and b.norm_bbox[1] < fn_min_y
+                ]
+                if upper_blocks:
+                    max_upper_y = max(b.norm_bbox[3] for b in upper_blocks)
+                    gap = fn_min_y - max_upper_y
+                    if gap > 0.01:  # meaningful gap between body and footnotes
+                        footnote_ys.append((max_upper_y + fn_min_y) / 2)
+
+        if footnote_ys and len(footnote_ys) >= 3:
+            threshold = np.median(footnote_ys)
+            logger.info(f"Footnote zone threshold (number-prefixed): {threshold:.3f}")
             return threshold
 
         return 1.0  # no footnote zone detected

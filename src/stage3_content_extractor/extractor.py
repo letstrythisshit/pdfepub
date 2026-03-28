@@ -145,8 +145,12 @@ class ContentExtractor:
         footnotes = []
         for block in blocks:
             if block.norm_bbox[1] >= layout.footnote_zone_y:
-                # Check if it's actually a small-font footnote block
+                # Small-font blocks in footnote zone are footnotes
                 if block.font_size <= layout.body_font_size * 0.9:
+                    footnotes.append(block)
+                # Same-size blocks starting with a number are also footnotes
+                elif re.match(r'^\d{1,3}\s', block.text.strip()) or \
+                     re.match(r'^\d{1,3}$', block.text.strip()):
                     footnotes.append(block)
                 else:
                     body.append(block)
@@ -219,10 +223,14 @@ class ContentExtractor:
                 is_italic=is_italic,
             )
 
+            # Store normalized Y position for footnote reference proximity matching
+            source_y = block.norm_bbox[1] if hasattr(block, 'norm_bbox') else 0.0
+
             paragraphs.append(Paragraph(
                 text=text,
                 spans=[span],
                 page_break_before=0,
+                _source_y=source_y,
             ))
 
         return paragraphs
@@ -292,13 +300,13 @@ class ContentExtractor:
                 ref_id = f"fnref-{fn.footnote_id}"
                 fn.ref_id = ref_id
 
-                # Add footnote reference to nearest paragraph
+                # Find the nearest paragraph by Y position
+                ref_y = ref['page_y']
                 closest_para = None
                 min_dist = float('inf')
                 for para in paragraphs:
                     if para.spans:
-                        # Simple proximity match
-                        dist = abs(ref['page_y'] - 0.5)  # rough
+                        dist = abs(ref_y - para._source_y)
                         if dist < min_dist:
                             min_dist = dist
                             closest_para = para
@@ -364,9 +372,11 @@ class ContentExtractor:
             cat = unicodedata.category(ch)
             if cat.startswith('C') and ch not in '\n\t ':
                 continue
-            # Replace PUA chars with placeholder for now
+            # Strip PUA chars (decorative glyphs like leader dots)
             if '\ue000' <= ch <= '\uf8ff':
-                cleaned.append('\ufffd')  # replacement character
+                continue
+            # Strip replacement character (U+FFFD) — often from unresolved PUA/encoding
+            if ch == '\ufffd':
                 continue
             cleaned.append(ch)
 
