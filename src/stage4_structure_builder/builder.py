@@ -41,8 +41,23 @@ class StructureBuilder:
         meta = analysis.metadata
         title = (meta.get('title', '') or '').strip()
         author = (meta.get('author', '') or '').strip()
+
+        # Detect if title looks like a filename (InDesign artifact)
+        if not title or '.indd' in title.lower() or title.startswith('0') or not any(c.isalpha() for c in title):
+            title = ''
+
+        # Extract title/author from first page if metadata is missing
+        if not title or not author:
+            extracted_title, extracted_author = self._extract_metadata_from_title_page(analysis)
+            if not title and extracted_title:
+                title = extracted_title
+            if not author and extracted_author:
+                author = extracted_author
+
         if not title:
             title = Path(analysis.file_path).stem.replace('_', ' ')
+        if not author:
+            author = "Unknown Author"
 
         # Detect chapters
         if analysis.outlines:
@@ -335,6 +350,58 @@ class StructureBuilder:
                     page_map[pn] = (ch.epub_filename, f"page{pn}")
 
         return page_map
+
+    def _extract_metadata_from_title_page(self, analysis) -> tuple:
+        """Extract title and author from the first page using font size heuristics."""
+        if not analysis.pages:
+            return "", ""
+
+        # Use only page 0 (the title page)
+        page_data = analysis.pages[0]
+        blocks = page_data.text_blocks
+        if not blocks:
+            return "", ""
+
+        # Collect all text blocks with size and position
+        sized_blocks = [(b.font_size, b.text.strip(), b.bbox[1]) for b in blocks
+                        if b.text.strip() and len(b.text.strip()) > 1]
+        if not sized_blocks:
+            return "", ""
+
+        sized_blocks.sort(key=lambda x: -x[0])
+        max_size = sized_blocks[0][0]
+
+        # Step 1: Find author — name-like block (2-3 capitalized words, mixed case)
+        # Sort by vertical position to check from top of page down
+        by_position = sorted(sized_blocks, key=lambda x: x[2])
+        author = ""
+        for size, text, y in by_position:
+            if size < 10:
+                continue
+            words = text.split()
+            if 2 <= len(words) <= 3:
+                is_name = all(
+                    w[0].isupper() and (len(w) == 1 or not w.isupper())
+                    for w in words if w.isalpha()
+                )
+                if is_name:
+                    author = text
+                    break
+
+        # Step 2: Title — largest font blocks, excluding the author block
+        title_parts = []
+        for size, text, y in sized_blocks:
+            if text == author:
+                continue
+            if size >= max_size * 0.8 and size > 14:
+                title_parts.append((y, text))
+
+        # Sort by vertical position and join, normalizing whitespace
+        title_parts.sort(key=lambda x: x[0])
+        title = ' '.join(t for _, t in title_parts) if title_parts else ""
+        title = re.sub(r'\s+', ' ', title).strip()
+
+        return title, author
 
     def _attach_images(self, chapters, images, analysis):
         """Attach extracted images to their chapters."""

@@ -1,6 +1,6 @@
-ALT_TEXT_PROMPT = """Describe this image for a visually impaired reader in one or two sentences.
-Be specific about what is shown. If there is text in the image, include it.
-Output only the description, nothing else. Output in English."""
+ALT_TEXT_PROMPT = """Apibūdinkite šį paveikslėlį silpnaregiui skaitytojui vienu ar dviem sakiniais.
+Tiksliai nurodykite, kas pavaizduota. Jei paveikslėlyje yra teksto, įtraukite jį.
+Pateikite tik aprašymą, nieko daugiau. Rašykite lietuvių kalba."""
 
 PUA_GLYPH_PROMPT = """This image shows a single character/glyph from a Lithuanian linguistics text.
 It is likely a Lithuanian letter with a special diacritical mark (acute, tilde, macron, ogonek, etc.).

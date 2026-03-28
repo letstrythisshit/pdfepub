@@ -42,8 +42,9 @@ class XHTMLBuilder:
         lines = []
         h_tag = f"h{min(chapter.level + 1, 6)}"  # level 1->h2, level 2->h2, level 3->h3
 
-        # Track emitted page IDs to avoid duplicates
+        # Track emitted page IDs and noteref anchors
         self._emitted_page_ids = set()
+        self._emitted_noteref_ids = set()
 
         # Chapter section with semantic attributes
         lines.append(f'<section epub:type="chapter" role="doc-chapter">')
@@ -80,8 +81,8 @@ class XHTMLBuilder:
                 lines.append(
                     f'  <aside id="{fn_id}" epub:type="footnote" role="doc-footnote">'
                 )
-                # Only add backlink if reference exists in text
-                if fn.ref_id:
+                # Only add backlink if the noteref anchor exists in this chapter
+                if fn.ref_id and fn.ref_id in self._emitted_noteref_ids:
                     lines.append(
                         f'    <p><a href="#{fn.ref_id}" role="doc-backlink">{marker}</a> '
                         f'{escaped_text}</p>'
@@ -180,6 +181,8 @@ class XHTMLBuilder:
                 # Footnote reference
                 fn_id = span.footnote_ref
                 ref_id = f"fnref-{fn_id}"
+                if hasattr(self, '_emitted_noteref_ids'):
+                    self._emitted_noteref_ids.add(ref_id)
                 parts.append(
                     f'<a id="{ref_id}" href="#{fn_id}" '
                     f'epub:type="noteref" role="doc-noteref">'

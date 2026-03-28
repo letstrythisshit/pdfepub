@@ -20,6 +20,7 @@ class Paragraph:
     spans: list = field(default_factory=list)  # list of TextSpan
     is_first_in_section: bool = False  # -> class="txt-p" vs "txt"
     page_break_before: int = 0  # page number for pagebreak before this para, 0=none
+    _source_y: float = 0.0  # normalized Y of source block (for footnote linking)
 
     def get_plain_text(self):
         if self.spans:
