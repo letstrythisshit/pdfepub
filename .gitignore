@@ -1,0 +1,8 @@
+output/
+*.epub
+__pycache__/
+*.pyc
+.work_*
+.epub_build_*
+ace_report/
+*.egg-info/
