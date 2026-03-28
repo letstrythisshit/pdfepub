@@ -5,11 +5,33 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-EPUBCHECK_JAR = "/tmp/epubcheck-5.2.1/epubcheck.jar"
+def _find_epubcheck():
+    """Auto-detect epubcheck.jar location."""
+    import shutil
+    candidates = [
+        os.environ.get("EPUBCHECK_JAR", ""),
+        "/tmp/epubcheck-5.2.1/epubcheck.jar",
+        "/usr/local/share/epubcheck/epubcheck.jar",
+        "/opt/epubcheck/epubcheck.jar",
+    ]
+    # Also check if epubcheck is on PATH (wrapper script)
+    if shutil.which("epubcheck"):
+        return "epubcheck"  # system-installed
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+    return None
+
+
+import os
+EPUBCHECK_JAR = _find_epubcheck()
 
 
 class QualityChecker:
     """Stage 6: Validate EPUB with epubcheck and ACE by DAISY."""
+
+    def __init__(self, epubcheck_path: str = None):
+        self.epubcheck_path = epubcheck_path or EPUBCHECK_JAR
 
     def check(self, epub_path: str) -> dict:
         epub_path = str(epub_path)
@@ -42,14 +64,22 @@ class QualityChecker:
 
     def _run_epubcheck(self, epub_path: str) -> dict:
         """Run W3C epubcheck."""
-        jar = EPUBCHECK_JAR
-        if not Path(jar).exists():
-            logger.warning(f"epubcheck not found at {jar}")
+        jar = self.epubcheck_path
+        if not jar:
+            logger.warning("epubcheck not found. Install it or set EPUBCHECK_JAR env var.")
             return {'error': 'epubcheck not installed', 'errors': -1}
 
         try:
+            if jar.endswith('.jar'):
+                if not Path(jar).exists():
+                    logger.warning(f"epubcheck not found at {jar}")
+                    return {'error': 'epubcheck not installed', 'errors': -1}
+                cmd = ['java', '-jar', jar, epub_path]
+            else:
+                cmd = [jar, epub_path]
+
             result = subprocess.run(
-                ['java', '-jar', jar, epub_path],
+                cmd,
                 capture_output=True, text=True, timeout=120
             )
 

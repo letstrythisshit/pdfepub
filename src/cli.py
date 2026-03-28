@@ -36,11 +36,13 @@ def main():
                        help='Enable verbose logging')
     parser.add_argument('--output-dir', default='output',
                        help='Output directory for batch mode')
+    parser.add_argument('--epubcheck', default=None,
+                       help='Path to epubcheck.jar (or set EPUBCHECK_JAR env var)')
 
     args = parser.parse_args()
     setup_logging(args.verbose)
 
-    pipeline = Pipeline(use_llm=not args.no_llm)
+    pipeline = Pipeline(use_llm=not args.no_llm, epubcheck_path=args.epubcheck)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

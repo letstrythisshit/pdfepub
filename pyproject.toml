@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdfepub"
+version = "1.0.0"
+description = "Convert PDF books to WCAG 2.2 AA compliant EPUB3"
+requires-python = ">=3.9"
+dependencies = [
+    "PyMuPDF>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "lxml>=4.9.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = ["python-dotenv"]
+
+[project.scripts]
+pdfepub = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
