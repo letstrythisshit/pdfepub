@@ -69,6 +69,12 @@ class NavBuilder:
                         f'    <li><a href="{ch.epub_filename}" epub:type="copyright-page">Copyright</a></li>'
                     )
 
+        # Add Turinys landmark if TOC entries exist
+        if doc.toc:
+            lines.append(
+                '    <li><a href="turinys.xhtml" epub:type="toc">Turinys</a></li>'
+            )
+
         if doc.chapters:
             lines.append(
                 f'    <li><a href="{doc.chapters[0].epub_filename}" '

@@ -32,6 +32,15 @@ class ContentExtractor:
         # then bold is actually normal body text
         body_font = self._detect_body_font(analysis)
 
+        # Pre-detect diagram regions so we can exclude their text from body
+        doc = fitz.open(analysis.file_path)
+        diagram_regions = self._detect_diagram_regions(doc, analysis)
+        doc.close()
+        # Map page_num -> list of diagram bboxes
+        diagram_map = {}
+        for pn, bbox in diagram_regions:
+            diagram_map.setdefault(pn, []).append(bbox)
+
         all_pages = []
         all_footnotes = {}
         all_images = []
@@ -47,6 +56,13 @@ class ContentExtractor:
             content_blocks = self._filter_decoration(
                 page_data.text_blocks, layout
             )
+
+            # Filter out text blocks inside diagram regions
+            if page_data.page_num in diagram_map:
+                content_blocks = self._filter_diagram_text(
+                    content_blocks, diagram_map[page_data.page_num],
+                    analysis.pages[page_data.page_num]
+                )
 
             body_blocks, fn_blocks = self._separate_footnotes(
                 content_blocks, layout, page_data
@@ -159,6 +175,24 @@ class ContentExtractor:
             return 0.0
         return intersection / area_a
 
+    def _filter_diagram_text(self, blocks: list, diagram_bboxes: list,
+                             page_data) -> list:
+        """Remove text blocks that fall within diagram regions."""
+        filtered = []
+        for block in blocks:
+            in_diagram = False
+            bx0, by0, bx1, by1 = block.bbox
+            for dx0, dy0, dx1, dy1 in diagram_bboxes:
+                # Check if block center is within the diagram bbox (with margin)
+                cx = (bx0 + bx1) / 2
+                cy = (by0 + by1) / 2
+                if dx0 - 5 <= cx <= dx1 + 5 and dy0 - 5 <= cy <= dy1 + 5:
+                    in_diagram = True
+                    break
+            if not in_diagram:
+                filtered.append(block)
+        return filtered
+
     def _separate_footnotes(self, blocks: list, layout: LayoutProfile,
                             page_data: PageData) -> tuple:
         """Split blocks into body and footnote zones."""
@@ -224,11 +258,12 @@ class ContentExtractor:
         for block in body_blocks:
             text = block.text
             for marker in sorted(markers, key=len, reverse=True):
-                # Use regex to find marker stuck to a letter (not preceded by digit/space)
-                # e.g. "apsiėjimus162." → "apsiėjimus."
-                # e.g. "virves90 suko" → "virves suko"
-                pattern = r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ.,;:)])' + re.escape(marker) + r'(?=[\s.,;:!?"\')]|$)'
-                text = re.sub(pattern, '', text)
+                # Pattern 1: marker stuck to a letter: "apsiėjimus162" → "apsiėjimus"
+                p1 = r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ.,;:)])' + re.escape(marker) + r'(?=[\s.,;:!?"\')]|$)'
+                text = re.sub(p1, '', text)
+                # Pattern 2: marker after punctuation+space: 'proto". 4' → 'proto".'
+                p2 = r'([.,"\'!?)\]"])\s+' + re.escape(marker) + r'(?=[.\s,;:!?"\')]|$)'
+                text = re.sub(p2, r'\1', text)
             block.text = text
 
     def _final_marker_cleanup(self, all_pages: list, all_fn_markers: set):
@@ -236,40 +271,76 @@ class ContentExtractor:
 
         Catches same-font-size references that weren't detected as superscripts
         and whose marker wasn't available during per-page processing.
-        Also catches numbers in the footnote range stuck to words.
+        Handles two patterns:
+          1. Numbers stuck to letters: "word162" → "word"
+          2. Numbers after punctuation+space: 'proto". 4.' → 'proto".'
         """
         if not all_fn_markers:
             return
 
-        # Determine the max footnote number to set a range for heuristic cleaning
         max_fn = max((int(m) for m in all_fn_markers if m.isdigit()), default=0)
         if max_fn == 0:
             return
 
+        def _in_range(num_str):
+            try:
+                return 1 <= int(num_str) <= max_fn + 5
+            except ValueError:
+                return False
+
         for page_data in all_pages:
             for para in page_data['paragraphs']:
                 text = para.text
-                # Find numbers stuck to letters: "word123" pattern
-                # Only strip if the number is in the plausible footnote range
-                def _strip_leaked(m):
-                    num = int(m.group(1))
-                    if 1 <= num <= max_fn + 5:
-                        return ''
-                    return m.group(1)
 
-                new_text = re.sub(
+                # Pattern 1: numbers stuck to letters (no space)
+                def _strip_after_letter(m):
+                    return '' if _in_range(m.group(1)) else m.group(1)
+                text = re.sub(
                     r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ])(\d{1,3})(?=[\s.,;:!?"\')]|$)',
-                    _strip_leaked, text
+                    _strip_after_letter, text
                 )
-                if new_text != text:
-                    para.text = new_text
-                    # Also update the first span's text
-                    if para.spans and para.spans[0].text == text:
-                        para.spans[0] = TextSpan(
-                            text=new_text,
-                            is_bold=para.spans[0].is_bold,
-                            is_italic=para.spans[0].is_italic,
-                        )
+
+                # Pattern 2: standalone numbers after punctuation+space
+                # e.g. 'proto". 4.' → 'proto".' or 'word. 4.' → 'word.'
+                def _strip_after_punct(m):
+                    num = m.group(2)
+                    if _in_range(num):
+                        return m.group(1)  # keep the punctuation, drop space+number
+                    return m.group(0)
+                text = re.sub(
+                    r'([.,"\'!?)\]"])\s+(\d{1,3})(?=[.\s,;:!?"\')]|$)',
+                    _strip_after_punct, text
+                )
+
+                # Clean up double spaces left by stripping
+                text = re.sub(r'  +', ' ', text)
+
+                if text != para.text:
+                    para.text = text
+                    # Update non-superscript spans that contain body text
+                    new_spans = []
+                    for s in para.spans:
+                        if s.is_superscript:
+                            new_spans.append(s)
+                        elif s.text != text:
+                            # Apply the same stripping to the span text
+                            stext = s.text
+                            stext = re.sub(
+                                r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ])(\d{1,3})(?=[\s.,;:!?"\')]|$)',
+                                _strip_after_letter, stext
+                            )
+                            stext = re.sub(
+                                r'([.,"\'!?)\]"])\s+(\d{1,3})(?=[.\s,;:!?"\')]|$)',
+                                _strip_after_punct, stext
+                            )
+                            new_spans.append(TextSpan(
+                                text=stext,
+                                is_bold=s.is_bold,
+                                is_italic=s.is_italic,
+                            ))
+                        else:
+                            new_spans.append(s)
+                    para.spans = new_spans
 
     def _blocks_to_paragraphs(self, blocks: list, layout: LayoutProfile,
                               page_num: int, body_font: dict = None) -> list:
@@ -411,10 +482,11 @@ class ContentExtractor:
                     ))
 
     def _extract_images(self, analysis: PDFAnalysis, img_dir: Path) -> list:
-        """Extract all images from the PDF."""
+        """Extract all images from the PDF, including vector diagrams."""
         images = []
         doc = fitz.open(analysis.file_path)
 
+        # 1. Extract embedded raster images
         seen_xrefs = set()
         for page_data in analysis.pages:
             for img_ref in page_data.images:
@@ -441,7 +513,7 @@ class ContentExtractor:
                                 img_bytes = buf.getvalue()
                                 ext = "png"
                             except Exception:
-                                continue  # skip unreadable images
+                                continue
 
                         img_path = img_dir / f"image_{img_ref.xref}.{ext}"
                         img_path.write_bytes(img_bytes)
@@ -453,8 +525,77 @@ class ContentExtractor:
                 except Exception as e:
                     logger.warning(f"Failed to extract image xref={img_ref.xref}: {e}")
 
+        # 2. Detect and render vector diagrams (boxes, lines, arrows)
+        diagram_regions = self._detect_diagram_regions(doc, analysis)
+        for page_num, bbox in diagram_regions:
+            try:
+                page = doc[page_num]
+                # Add padding around the diagram region
+                pad = 5
+                clip = fitz.Rect(
+                    max(0, bbox[0] - pad),
+                    max(0, bbox[1] - pad),
+                    min(page.rect.width, bbox[2] + pad),
+                    min(page.rect.height, bbox[3] + pad),
+                )
+                # Render the clipped region at high DPI
+                mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for clarity
+                pix = page.get_pixmap(matrix=mat, clip=clip)
+                img_path = img_dir / f"diagram_p{page_num}.png"
+                pix.save(str(img_path))
+                images.append((str(img_path), page_num, tuple(clip)))
+                logger.info(f"Rendered vector diagram on page {page_num}")
+            except Exception as e:
+                logger.warning(f"Failed to render diagram on page {page_num}: {e}")
+
         doc.close()
         return images
+
+    def _detect_diagram_regions(self, doc, analysis) -> list:
+        """Detect pages with vector diagrams (boxes, lines, arrows).
+
+        Returns list of (page_num, bbox) for significant drawing regions.
+        """
+        regions = []
+        for page_data in analysis.pages:
+            page = doc[page_data.page_num]
+            try:
+                drawings = page.get_drawings()
+            except Exception:
+                continue
+
+            if len(drawings) < 3:
+                continue
+
+            # Filter out single-line decorations (separators, underlines)
+            significant = []
+            for d in drawings:
+                rect = d.get('rect')
+                if not rect:
+                    continue
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                items = d.get('items', [])
+                # Significant: has multiple path items OR is a rectangle
+                if len(items) >= 2 or (w > 20 and h > 20):
+                    significant.append(rect)
+
+            if len(significant) < 2:
+                continue
+
+            # Compute bounding box of all significant drawings
+            x0 = min(r[0] for r in significant)
+            y0 = min(r[1] for r in significant)
+            x1 = max(r[2] for r in significant)
+            y1 = max(r[3] for r in significant)
+
+            # Only count as diagram if the area is substantial
+            area = (x1 - x0) * (y1 - y0)
+            page_area = page.rect.width * page.rect.height
+            if area > page_area * 0.05 and (x1 - x0) > 50 and (y1 - y0) > 30:
+                regions.append((page_data.page_num, (x0, y0, x1, y1)))
+
+        return regions
 
     def _clean_text(self, text: str) -> str:
         """Clean text: remove control chars, normalize whitespace."""
