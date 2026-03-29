@@ -59,15 +59,21 @@ class StructureBuilder:
         if not author:
             author = "Unknown Author"
 
-        # Detect chapters
+        # Detect chapters: Path A (PDF outlines), Path B (Turinys page), Path C (heuristics)
         if analysis.outlines:
             chapters = self._build_from_outlines(
                 analysis, layout, pages, footnotes
             )
         else:
-            chapters = self._build_from_heuristics(
-                analysis, layout, pages, footnotes
-            )
+            toc_entries = self._parse_toc_page(analysis)
+            if toc_entries:
+                chapters = self._build_from_toc_entries(
+                    toc_entries, analysis, layout, pages, footnotes
+                )
+            else:
+                chapters = self._build_from_heuristics(
+                    analysis, layout, pages, footnotes
+                )
 
         # Separate front matter
         front_matter, main_chapters = self._separate_front_matter(
@@ -242,21 +248,153 @@ class StructureBuilder:
 
         return chapters
 
+    def _parse_toc_page(self, analysis) -> list:
+        """Parse printed Turinys (TOC) page for chapter structure.
+
+        Returns list of (title, page_num_0based) or None if no TOC found.
+        """
+        for page_data in analysis.pages[:10]:
+            # Check if page contains "Turinys" heading
+            has_turinys = False
+            for block in page_data.text_blocks:
+                if block.text.strip().lower() == 'turinys':
+                    has_turinys = True
+                    break
+            if not has_turinys:
+                continue
+
+            # Parse TOC entries from all blocks on this page (and next page)
+            entries = []
+            toc_pages = [page_data]
+            # Also check the next page (TOC can span 2 pages)
+            pn = page_data.page_num
+            if pn + 1 < len(analysis.pages):
+                toc_pages.append(analysis.pages[pn + 1])
+
+            for tp in toc_pages:
+                for block in tp.text_blocks:
+                    # Split block text by newlines (TOC entries can be in one block)
+                    raw_lines = block.text.split('\n')
+                    for line in raw_lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # Remove leader dots, FFFD, control chars, and excessive whitespace
+                        line = re.sub(r'[.·•�\u00b7\x08\u2002]+', ' ', line)
+                        line = re.sub(r'\s{2,}', ' ', line).strip()
+                        # Match "TITLE NUMBER" pattern
+                        m = re.match(r'^(.+?)\s+(\d{1,3})\s*$', line)
+                        if m:
+                            entry_title = m.group(1).strip()
+                            page_num = int(m.group(2)) - 1  # convert to 0-based
+                            # Skip the "Turinys" entry itself and page-header artifacts
+                            if entry_title.lower() in ('turinys', ''):
+                                continue
+                            if page_num >= 0 and len(entry_title) > 1:
+                                entries.append((entry_title, page_num))
+
+            if len(entries) >= 3:
+                logger.info(f"Parsed Turinys page: {len(entries)} entries")
+                return entries
+
+        return None
+
+    def _build_from_toc_entries(self, toc_entries, analysis, layout,
+                                pages, footnotes) -> list:
+        """Build chapters from parsed Turinys entries.
+
+        Filter to main chapters only (skip subsections) by detecting
+        uppercase vs mixed-case titles.
+        """
+        # Determine which entries are main chapters vs subsections
+        # Main chapters tend to be uppercase or significantly larger
+        uppercase_entries = [(t, p) for t, p in toc_entries if t.isupper() or t[0].isupper()]
+
+        # If most entries are uppercase, filter to only uppercase
+        upper_count = sum(1 for t, _ in toc_entries if t.isupper())
+        if upper_count >= 3 and upper_count < len(toc_entries):
+            main_entries = [(t, p) for t, p in toc_entries if t.isupper()]
+        else:
+            main_entries = toc_entries
+
+        # Deduplicate by page number (keep first entry per page)
+        seen_pages = set()
+        deduped = []
+        for title, page_num in main_entries:
+            if page_num not in seen_pages:
+                seen_pages.add(page_num)
+                deduped.append((title, page_num))
+        main_entries = deduped
+
+        if not main_entries:
+            main_entries = toc_entries
+
+        chapters = []
+        for i, (title, start_page) in enumerate(main_entries):
+            end_page = (main_entries[i + 1][1] if i + 1 < len(main_entries)
+                       else analysis.page_count)
+
+            paras = []
+            chap_fn = []
+            for pd in pages:
+                pn = pd['page_num']
+                if start_page <= pn < end_page:
+                    page_paras = pd['paragraphs']
+                    if page_paras and pn > start_page:
+                        page_paras[0].page_break_before = pn + 1
+                    paras.extend(page_paras)
+                    chap_fn.extend(pd.get('footnotes', []))
+
+            if paras:
+                paras[0].is_first_in_section = True
+                paras[0].page_break_before = start_page + 1
+
+            # Remove chapter title from first paragraph if embedded
+            if paras and title:
+                first_text = paras[0].text.strip()
+                if first_text.lower().startswith(title.lower()[:15]):
+                    remaining = first_text[len(title):].strip()
+                    if remaining:
+                        paras[0].text = remaining
+                        paras[0].spans = [TextSpan(text=remaining)]
+                    else:
+                        paras.pop(0)
+                        if paras:
+                            paras[0].is_first_in_section = True
+
+            chapters.append(Chapter(
+                title=title.strip(),
+                level=2,
+                paragraphs=paras,
+                footnotes=chap_fn,
+                start_page=start_page,
+            ))
+
+        logger.info(f"Built {len(chapters)} chapters from Turinys entries")
+        return chapters
+
     def _extract_title_from_page(self, page_data, layout) -> str:
-        """Extract the chapter title from a page."""
+        """Extract the chapter title from a page.
+
+        Searches through heading sizes from largest to smallest until
+        matching text is found on the page.
+        """
         if not layout.heading_font_sizes:
             return ""
 
-        largest = layout.heading_font_sizes[0]
-        title_blocks = []
-        for block in page_data.text_blocks:
-            if abs(block.font_size - largest) < 1.0:
-                title_blocks.append(block)
+        for heading_size in layout.heading_font_sizes:
+            title_blocks = []
+            for block in page_data.text_blocks:
+                if abs(block.font_size - heading_size) < 1.0:
+                    text = block.text.strip()
+                    if text and len(text) > 1:
+                        title_blocks.append(block)
 
-        if title_blocks:
-            # Sort by position and join
-            title_blocks.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
-            return ' '.join(b.text.strip() for b in title_blocks)
+            if title_blocks:
+                title_blocks.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
+                title = ' '.join(b.text.strip() for b in title_blocks)
+                title = re.sub(r'\s+', ' ', title).strip()
+                return title
 
         return ""
 
@@ -279,10 +417,12 @@ class StructureBuilder:
         # If no front matter detected but first chapter starts late, create it
         if not front and chapters and chapters[0].start_page > 2:
             # Pages before first chapter are front matter
+            # Filter out TOC pages (they contain printed table of contents)
             fm_paras = []
             for pd in pages:
                 if pd['page_num'] < chapters[0].start_page:
-                    fm_paras.extend(pd['paragraphs'])
+                    if not self._is_toc_page(pd):
+                        fm_paras.extend(pd['paragraphs'])
 
             if fm_paras:
                 front.append(Chapter(
@@ -293,6 +433,32 @@ class StructureBuilder:
                 ))
 
         return front, main
+
+    def _is_toc_page(self, page_data) -> bool:
+        """Detect if a page contains a printed table of contents."""
+        paras = page_data.get('paragraphs', [])
+        if not paras:
+            return False
+
+        # Check for "Turinys" heading
+        for para in paras:
+            if para.text.strip().lower() in ('turinys', 'turinys.'):
+                return True
+
+        # Check for TOC-like pattern: many lines ending with numbers
+        number_lines = 0
+        total_lines = 0
+        for para in paras:
+            text = para.text.strip()
+            if not text:
+                continue
+            total_lines += 1
+            # TOC entry pattern: text followed by page number
+            if re.match(r'.+\s+\d{1,3}\s*$', text):
+                number_lines += 1
+
+        # If majority of lines have trailing numbers, it's a TOC page
+        return total_lines >= 5 and number_lines >= total_lines * 0.5
 
     def _assign_filenames(self, front_matter, chapters):
         """Assign EPUB filenames to chapters."""

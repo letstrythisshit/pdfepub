@@ -37,28 +37,21 @@ class ContentExtractor:
         all_images = []
         global_fn_counter = 0
 
+        # Two-pass approach: first collect all footnote markers, then strip
+        # This handles cross-page references (marker on page X, footnote on page Y)
+        page_results = []
+        all_fn_markers = set()
+
+        # Pass 1: separate content, parse footnotes, detect superscripts
         for page_data in analysis.pages:
-            # Filter out repeating elements
             content_blocks = self._filter_decoration(
                 page_data.text_blocks, layout
             )
 
-            # Separate body from footnotes
             body_blocks, fn_blocks = self._separate_footnotes(
                 content_blocks, layout, page_data
             )
 
-            # Detect superscript references in body
-            body_blocks, refs = self._detect_superscripts(
-                body_blocks, layout.body_font_size
-            )
-
-            # Build paragraphs from body blocks
-            paragraphs = self._blocks_to_paragraphs(
-                body_blocks, layout, page_data.page_num, body_font
-            )
-
-            # Parse footnotes with globally unique counter
             page_footnotes = self._parse_footnotes(
                 fn_blocks, page_data.page_num, global_fn_counter
             )
@@ -66,8 +59,33 @@ class ContentExtractor:
 
             for fn in page_footnotes:
                 all_footnotes[fn.footnote_id] = fn
+                all_fn_markers.add(fn.marker)
 
-            # Link superscript refs to footnotes
+            body_blocks, refs = self._detect_superscripts(
+                body_blocks, layout.body_font_size
+            )
+
+            page_results.append({
+                'page_data': page_data,
+                'body_blocks': body_blocks,
+                'refs': refs,
+                'page_footnotes': page_footnotes,
+            })
+
+        # Pass 2: strip markers using global footnote marker set, build paragraphs
+        for pr in page_results:
+            body_blocks = pr['body_blocks']
+            refs = pr['refs']
+            page_footnotes = pr['page_footnotes']
+            page_data = pr['page_data']
+
+            # Strip using both detected refs AND all known footnote markers
+            self._strip_superscript_markers(body_blocks, refs, all_fn_markers)
+
+            paragraphs = self._blocks_to_paragraphs(
+                body_blocks, layout, page_data.page_num, body_font
+            )
+
             self._link_refs_to_footnotes(paragraphs, refs, page_footnotes)
 
             all_pages.append({
@@ -76,6 +94,12 @@ class ContentExtractor:
                 'footnotes': page_footnotes,
                 'body_blocks': body_blocks,
             })
+
+        # Final cleanup: strip any remaining leaked superscript numbers
+        # from paragraph text (catches same-font-size embedded references
+        # that couldn't be detected from font size alone)
+        if all_fn_markers:
+            self._final_marker_cleanup(all_pages, all_fn_markers)
 
         # Extract images from PDF
         all_images = self._extract_images(analysis, img_dir)
@@ -178,6 +202,74 @@ class ContentExtractor:
                 result_blocks.append(block)
 
         return result_blocks, refs
+
+    def _strip_superscript_markers(self, body_blocks: list, refs: list,
+                                    fn_markers: set = None):
+        """Strip superscript marker text embedded in parent block text.
+
+        PyMuPDF includes small-font spans in the parent block's text string,
+        so after removing the superscript block, the marker (e.g. "162") remains
+        in the body block text (e.g. "apsiėjimus162."). Strip it.
+
+        Uses both detected superscript refs AND known footnote markers from
+        the page, since some superscripts are embedded spans that aren't
+        detected as separate blocks.
+        """
+        markers = {ref['text'] for ref in refs} if refs else set()
+        if fn_markers:
+            markers |= fn_markers
+        if not markers:
+            return
+
+        for block in body_blocks:
+            text = block.text
+            for marker in sorted(markers, key=len, reverse=True):
+                # Use regex to find marker stuck to a letter (not preceded by digit/space)
+                # e.g. "apsiėjimus162." → "apsiėjimus."
+                # e.g. "virves90 suko" → "virves suko"
+                pattern = r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ.,;:)])' + re.escape(marker) + r'(?=[\s.,;:!?"\')]|$)'
+                text = re.sub(pattern, '', text)
+            block.text = text
+
+    def _final_marker_cleanup(self, all_pages: list, all_fn_markers: set):
+        """Final pass: strip leaked footnote numbers from paragraph text.
+
+        Catches same-font-size references that weren't detected as superscripts
+        and whose marker wasn't available during per-page processing.
+        Also catches numbers in the footnote range stuck to words.
+        """
+        if not all_fn_markers:
+            return
+
+        # Determine the max footnote number to set a range for heuristic cleaning
+        max_fn = max((int(m) for m in all_fn_markers if m.isdigit()), default=0)
+        if max_fn == 0:
+            return
+
+        for page_data in all_pages:
+            for para in page_data['paragraphs']:
+                text = para.text
+                # Find numbers stuck to letters: "word123" pattern
+                # Only strip if the number is in the plausible footnote range
+                def _strip_leaked(m):
+                    num = int(m.group(1))
+                    if 1 <= num <= max_fn + 5:
+                        return ''
+                    return m.group(1)
+
+                new_text = re.sub(
+                    r'(?<=[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ])(\d{1,3})(?=[\s.,;:!?"\')]|$)',
+                    _strip_leaked, text
+                )
+                if new_text != text:
+                    para.text = new_text
+                    # Also update the first span's text
+                    if para.spans and para.spans[0].text == text:
+                        para.spans[0] = TextSpan(
+                            text=new_text,
+                            is_bold=para.spans[0].is_bold,
+                            is_italic=para.spans[0].is_italic,
+                        )
 
     def _blocks_to_paragraphs(self, blocks: list, layout: LayoutProfile,
                               page_num: int, body_font: dict = None) -> list:
