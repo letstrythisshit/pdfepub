@@ -60,24 +60,28 @@ class StructureBuilder:
             author = "Unknown Author"
 
         # Detect chapters: Path A (PDF outlines), Path B (Turinys page), Path C (heuristics)
+        toc_page_nums = []  # pages containing printed TOC
+        toc_entries_raw = None
         if analysis.outlines:
             chapters = self._build_from_outlines(
                 analysis, layout, pages, footnotes
             )
+            # Still parse TOC for creating a navigable Turinys chapter
+            toc_entries_raw, toc_page_nums = self._parse_toc_page(analysis)
         else:
-            toc_entries = self._parse_toc_page(analysis)
-            if toc_entries:
+            toc_entries_raw, toc_page_nums = self._parse_toc_page(analysis)
+            if toc_entries_raw:
                 chapters = self._build_from_toc_entries(
-                    toc_entries, analysis, layout, pages, footnotes
+                    toc_entries_raw, analysis, layout, pages, footnotes
                 )
             else:
                 chapters = self._build_from_heuristics(
                     analysis, layout, pages, footnotes
                 )
 
-        # Separate front matter
+        # Separate front matter (pass TOC page nums to exclude them)
         front_matter, main_chapters = self._separate_front_matter(
-            chapters, layout, pages
+            chapters, layout, pages, toc_page_nums
         )
 
         # Assign EPUB filenames
@@ -107,6 +111,7 @@ class StructureBuilder:
             page_map=page_map,
             total_pages=analysis.page_count,
             images=doc_images,
+            toc_entries_raw=toc_entries_raw or [],
         )
 
         logger.info(f"Structure: {len(front_matter)} front matter, "
@@ -248,10 +253,12 @@ class StructureBuilder:
 
         return chapters
 
-    def _parse_toc_page(self, analysis) -> list:
+    def _parse_toc_page(self, analysis) -> tuple:
         """Parse printed Turinys (TOC) page for chapter structure.
 
-        Returns list of (title, page_num_0based) or None if no TOC found.
+        Returns (entries, toc_page_numbers) where entries is list of
+        (title, page_num_0based) or (None, []) if no TOC found.
+        toc_page_numbers is the list of 0-based page numbers that contain the TOC.
         """
         for page_data in analysis.pages[:10]:
             # Check if page contains "Turinys" heading
@@ -263,13 +270,34 @@ class StructureBuilder:
             if not has_turinys:
                 continue
 
-            # Parse TOC entries from all blocks on this page (and next page)
+            # Parse TOC entries from this page and subsequent continuation pages
             entries = []
             toc_pages = [page_data]
-            # Also check the next page (TOC can span 2 pages)
+            toc_page_nums = [page_data.page_num]
             pn = page_data.page_num
-            if pn + 1 < len(analysis.pages):
-                toc_pages.append(analysis.pages[pn + 1])
+
+            # Check up to 5 continuation pages (large TOCs can span many pages)
+            for offset in range(1, 6):
+                next_pn = pn + offset
+                if next_pn >= len(analysis.pages):
+                    break
+                next_page = analysis.pages[next_pn]
+                # Continuation page: has leader dots/numbers pattern in blocks
+                has_toc_content = False
+                for block in next_page.text_blocks:
+                    for line in block.text.split('\n'):
+                        cleaned = re.sub(r'[.·•\u00b7\u2002]+', ' ', line)
+                        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+                        if re.match(r'^.{3,}\s+\d{1,3}\s*$', cleaned):
+                            has_toc_content = True
+                            break
+                    if has_toc_content:
+                        break
+                if has_toc_content:
+                    toc_pages.append(next_page)
+                    toc_page_nums.append(next_pn)
+                else:
+                    break
 
             for tp in toc_pages:
                 for block in tp.text_blocks:
@@ -280,7 +308,7 @@ class StructureBuilder:
                         if not line:
                             continue
                         # Remove leader dots, FFFD, control chars, and excessive whitespace
-                        line = re.sub(r'[.·•�\u00b7\x08\u2002]+', ' ', line)
+                        line = re.sub(r'[.·•\ufffd\u00b7\x08\u2002]+', ' ', line)
                         line = re.sub(r'\s{2,}', ' ', line).strip()
                         # Match "TITLE NUMBER" pattern
                         m = re.match(r'^(.+?)\s+(\d{1,3})\s*$', line)
@@ -294,10 +322,11 @@ class StructureBuilder:
                                 entries.append((entry_title, page_num))
 
             if len(entries) >= 3:
-                logger.info(f"Parsed Turinys page: {len(entries)} entries")
-                return entries
+                logger.info(f"Parsed Turinys page: {len(entries)} entries "
+                           f"(pages {toc_page_nums})")
+                return entries, toc_page_nums
 
-        return None
+        return None, []
 
     def _build_from_toc_entries(self, toc_entries, analysis, layout,
                                 pages, footnotes) -> list:
@@ -398,10 +427,13 @@ class StructureBuilder:
 
         return ""
 
-    def _separate_front_matter(self, chapters, layout, pages) -> tuple:
+    def _separate_front_matter(self, chapters, layout, pages,
+                               toc_page_nums=None) -> tuple:
         """Separate front matter chapters from main content."""
         if not chapters:
             return [], []
+
+        toc_pages_set = set(toc_page_nums or [])
 
         front = []
         main = []
@@ -417,12 +449,15 @@ class StructureBuilder:
         # If no front matter detected but first chapter starts late, create it
         if not front and chapters and chapters[0].start_page > 2:
             # Pages before first chapter are front matter
-            # Filter out TOC pages (they contain printed table of contents)
+            # Filter out TOC pages using both known TOC page nums and heuristic
             fm_paras = []
             for pd in pages:
                 if pd['page_num'] < chapters[0].start_page:
-                    if not self._is_toc_page(pd):
-                        fm_paras.extend(pd['paragraphs'])
+                    if pd['page_num'] in toc_pages_set:
+                        continue  # skip known TOC pages
+                    if self._is_toc_page(pd):
+                        continue  # skip heuristically detected TOC pages
+                    fm_paras.extend(pd['paragraphs'])
 
             if fm_paras:
                 front.append(Chapter(
@@ -570,14 +605,20 @@ class StructureBuilder:
         return title, author
 
     def _attach_images(self, chapters, images, analysis):
-        """Attach extracted images to their chapters."""
-        if not images:
+        """Attach extracted images to their chapters by page range."""
+        if not images or not chapters:
             return
 
         for img_path, page_num, bbox in images:
-            # Find which chapter this page belongs to
-            for ch in chapters:
-                ch_end = ch.start_page + len(ch.paragraphs)  # rough estimate
-                if ch.start_page <= page_num:
-                    ch.images.append((img_path, ""))  # alt text added later
+            # Find which chapter contains this page
+            best_ch = None
+            for i, ch in enumerate(chapters):
+                end_page = (chapters[i + 1].start_page if i + 1 < len(chapters)
+                           else analysis.page_count)
+                if ch.start_page <= page_num < end_page:
+                    best_ch = ch
                     break
+            if best_ch is None and chapters:
+                best_ch = chapters[-1]
+            if best_ch:
+                best_ch.images.append((img_path, "", page_num, bbox))

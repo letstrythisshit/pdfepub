@@ -81,3 +81,4 @@ class DocumentStructure:
 
     images: list = field(default_factory=list)  # list of (path, alt_text)
     cover_image: str = ""
+    toc_entries_raw: list = field(default_factory=list)  # [(title, page_num_0based), ...]

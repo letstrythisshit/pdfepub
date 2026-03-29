@@ -87,6 +87,12 @@ class EPUBGenerator:
             (oebps / ch.epub_filename).write_text(xhtml, encoding="utf-8")
             content_files.append((ch.epub_filename, ch.title, "frontmatter"))
 
+        # Turinys (TOC) page — navigable chapter with links to all chapters
+        if doc.toc:
+            turinys_xhtml = self.xhtml.build_turinys(doc)
+            (oebps / "turinys.xhtml").write_text(turinys_xhtml, encoding="utf-8")
+            content_files.append(("turinys.xhtml", "Turinys", "frontmatter"))
+
         # Main chapters
         for ch in doc.chapters:
             xhtml = self.xhtml.build_chapter(ch, doc)
@@ -136,17 +142,19 @@ class EPUBGenerator:
 
         doc.images = updated_images
 
-        # Also update chapter images
+        # Also update chapter images (preserve extra fields like page_num, bbox)
         for ch in doc.chapters:
             updated = []
-            for img_path, alt in ch.images:
+            for img_tuple in ch.images:
+                img_path = img_tuple[0]
+                extra = img_tuple[2:] if len(img_tuple) > 2 else ()
                 # Find matching alt from doc.images
                 for di_path, di_alt in doc.images:
                     if di_path == img_path:
-                        updated.append((img_path, di_alt))
+                        updated.append((img_path, di_alt) + extra)
                         break
                 else:
-                    updated.append((img_path, alt or "Image from the book"))
+                    updated.append((img_path, img_tuple[1] or "Image from the book") + extra)
             ch.images = updated
 
     def _get_media_type(self, ext: str) -> str:

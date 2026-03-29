@@ -10,7 +10,6 @@ import requests
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # Model configs with approximate costs per 1M tokens
 MODELS = {
@@ -24,10 +23,12 @@ BUDGET_LIMIT = 4.0  # dollars
 
 
 class LLMClient:
-    def __init__(self, budget_limit: float = BUDGET_LIMIT):
+    def __init__(self, budget_limit: float = BUDGET_LIMIT, api_key: str = ""):
         self.budget_limit = budget_limit
         self.total_spent = 0.0
         self.call_log = []
+        # Read API key: explicit param > env var at init time (not import time)
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
     def _check_budget(self, estimated_cost: float = 0.05):
         if self.total_spent + estimated_cost > self.budget_limit:
@@ -41,7 +42,7 @@ class LLMClient:
         self._check_budget()
 
         headers = {
-            "Authorization": f"Bearer {API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload = {

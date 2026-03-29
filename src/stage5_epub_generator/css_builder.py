@@ -189,4 +189,19 @@ nav[epub\\:type="toc"] a {
 nav[epub\\:type="toc"] li {
   margin: 0.3em 0;
 }
+
+/* Turinys (TOC) chapter page */
+.toc-entry {
+  text-indent: 0;
+  margin: 0.3em 0;
+}
+
+.toc-entry a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.toc-sub {
+  padding-left: 1.5em;
+}
 '''

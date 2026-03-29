@@ -38,6 +38,36 @@ class XHTMLBuilder:
         parts.append(self.XHTML_FOOTER)
         return ''.join(parts)
 
+    def build_turinys(self, doc: DocumentStructure) -> str:
+        """Build a navigable Turinys (table of contents) page with links."""
+        lang = doc.language or "lt-LT"
+        parts = [self.XHTML_HEADER.format(lang=lang, title="Turinys")]
+
+        lines = []
+        lines.append('<section epub:type="toc" role="doc-toc">')
+        lines.append('  <h1 aria-label="Turinys">Turinys</h1>')
+
+        # Build linked TOC entries from doc.toc
+        for entry in doc.toc:
+            target = entry.target_file
+            if entry.target_anchor:
+                target += entry.target_anchor
+            title = escape(entry.title)
+            lines.append(f'  <p class="toc-entry"><a href="{target}">{title}</a></p>')
+            for child in entry.children:
+                ctarget = child.target_file
+                if child.target_anchor:
+                    ctarget += child.target_anchor
+                ctitle = escape(child.title)
+                lines.append(
+                    f'  <p class="toc-entry toc-sub"><a href="{ctarget}">{ctitle}</a></p>'
+                )
+
+        lines.append('</section>')
+        parts.append('\n'.join(lines))
+        parts.append(self.XHTML_FOOTER)
+        return ''.join(parts)
+
     def _build_chapter_section(self, chapter: Chapter, doc: DocumentStructure) -> str:
         lines = []
         h_tag = f"h{min(chapter.level + 1, 6)}"  # level 1->h2, level 2->h2, level 3->h3
@@ -64,9 +94,43 @@ class XHTMLBuilder:
             f'  <{h_tag} aria-label="{escaped_title}">{escaped_title}</{h_tag}>'
         )
 
-        # Paragraphs
+        # Build image map: page_num -> list of (img_index, alt_text)
+        chapter_images = {}
+        if chapter.images:
+            for i, img_tuple in enumerate(chapter.images):
+                # Support both (path, alt) and (path, alt, page, bbox) formats
+                if len(img_tuple) >= 3:
+                    img_path, alt, page_num = img_tuple[0], img_tuple[1], img_tuple[2]
+                else:
+                    img_path, alt = img_tuple[0], img_tuple[1]
+                    page_num = chapter.start_page
+                chapter_images.setdefault(page_num, []).append((i, alt or "Illustration"))
+
+        # Paragraphs with image insertion
+        current_page = chapter.start_page
+        inserted_image_pages = set()
         for para in chapter.paragraphs:
+            # Track current page from page breaks
+            if para.page_break_before > 0:
+                current_page = para.page_break_before - 1  # convert back to 0-based
+
+            # Insert images that belong to this page (before next paragraph)
+            if current_page in chapter_images and current_page not in inserted_image_pages:
+                inserted_image_pages.add(current_page)
+                for img_idx, alt_text in chapter_images[current_page]:
+                    lines.append(self._build_image_figure(
+                        chapter, img_idx, alt_text, doc
+                    ))
+
             lines.append(self._build_paragraph(para, doc))
+
+        # Insert any remaining images that weren't placed yet
+        for page_num, img_list in chapter_images.items():
+            if page_num not in inserted_image_pages:
+                for img_idx, alt_text in img_list:
+                    lines.append(self._build_image_figure(
+                        chapter, img_idx, alt_text, doc
+                    ))
 
         lines.append('</section>')
 
@@ -143,6 +207,37 @@ class XHTMLBuilder:
 
         lines.append('</section>')
         return '\n'.join(lines)
+
+    def _build_image_figure(self, chapter: Chapter, img_idx: int,
+                              alt_text: str, doc: DocumentStructure) -> str:
+        """Build a figure element for an image in the chapter."""
+        if img_idx >= len(chapter.images):
+            return ''
+        img_tuple = chapter.images[img_idx]
+        img_path = img_tuple[0]
+
+        # Find the matching image in doc.images to get the EPUB path
+        from pathlib import Path
+        img_filename = Path(img_path).name
+        # The generator copies images to image/ directory with numbered names
+        # We need to find the index in doc.images to match
+        epub_img_name = None
+        for di, (di_path, di_alt) in enumerate(doc.images):
+            if di_path == img_path:
+                ext = Path(di_path).suffix
+                epub_img_name = f"image_{di + 1}{ext}"
+                break
+
+        if not epub_img_name:
+            # Fallback: use the original filename
+            epub_img_name = img_filename
+
+        escaped_alt = escape(alt_text)
+        return (
+            f'  <figure>\n'
+            f'    <img src="image/{epub_img_name}" alt="{escaped_alt}"/>\n'
+            f'  </figure>'
+        )
 
     def _build_paragraph(self, para: Paragraph, doc: DocumentStructure) -> str:
         parts = []
